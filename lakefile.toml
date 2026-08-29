@@ -1,0 +1,10 @@
+name = "sexp"
+version = "0.1.0"
+defaultTargets = ["sexp"]
+
+[[lean_lib]]
+name = "Sexp"
+
+[[lean_exe]]
+name = "sexp"
+root = "Main"
