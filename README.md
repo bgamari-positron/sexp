@@ -36,7 +36,11 @@ Derived grammar is positional and canonical:
 - lists: `(list VALUE...)`
 - booleans: `yes` or `no`
 
-Current deriving support covers non-recursive structures, including parameterized structures. It generates the necessary `SExprCodec` constraints for type parameters used by fields.
+Construct decimals with `Decimal.ofScientific mantissa scale`. It canonicalizes trailing
+fractional zeroes while retaining read-only `mantissa` and `scale` accessors; for example,
+`Decimal.ofScientific 10 1` has mantissa `1` and scale `0`.
+
+Current deriving support covers non-recursive structures, including parameterized structures. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
 
 ## Development
 
@@ -45,12 +49,12 @@ With direnv:
 ```sh
 direnv allow
 lake build
-lake exe sexp
+lake test
 ```
 
 Without direnv:
 
 ```sh
 nix develop -c lake build
-nix develop -c lake exe sexp
+nix develop -c lake test
 ```

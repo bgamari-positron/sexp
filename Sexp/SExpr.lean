@@ -7,6 +7,7 @@ inductive Quoting where
 
 /-- Exact, canonical decimal value: `mantissa * 10⁻scale`. -/
 structure Decimal where
+  private mk ::
   mantissa : Int
   scale : Nat
   deriving Repr, BEq, Ord
@@ -21,8 +22,9 @@ private def normalizeAux (mantissa : Int) : (scale : Nat) → Decimal
       else
         { mantissa, scale := scale + 1 }
 
-protected def normalize (d : Decimal) : Decimal :=
-  normalizeAux d.mantissa d.scale
+/-- Construct a decimal, removing trailing fractional zeroes. -/
+def ofScientific (mantissa : Int) (scale : Nat) : Decimal :=
+  normalizeAux mantissa scale
 
 private def digit? (c : Char) : Option Nat :=
   if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat) else none
@@ -47,10 +49,9 @@ protected def parse? (s : String) : Option Decimal := do
     | _ => none
   let magnitude := wholeValue * 10 ^ scale + fraction
   let mantissa : Int := if negative then -(Int.ofNat magnitude) else Int.ofNat magnitude
-  pure (Decimal.normalize { mantissa, scale })
+  pure (Decimal.ofScientific mantissa scale)
 
 protected def render (d : Decimal) : String :=
-  let d := d.normalize
   let sign := if d.mantissa < 0 then "-" else ""
   let digits := toString d.mantissa.natAbs
   if d.scale = 0 then
@@ -204,23 +205,27 @@ private def renderHex (n : Nat) : String :=
   else renderHex (n / 16) ++ String.singleton (renderHexDigit (n % 16))
 termination_by n
 
-/-- Render in compact canonical form. -/
-def render : SExpr → String
-  | .str .quoted value => "\"" ++ escape value ++ "\""
-  | .str .bare value => value
-  | .num value => value.render
-  | .hex value => "0x" ++ renderHex value
-  | .list children => "(" ++ " ".intercalate (children.map render) ++ ")"
-
-private def canBeBare (value : String) : Bool :=
+/-- Whether a string has an unambiguous, nonempty bare spelling. -/
+def isValidBare (value : String) : Bool :=
   !value.isEmpty && value.toList.all (fun c => !delimiter c) &&
     match classify value with
     | .str .bare _ => true
     | _ => false
 
+private def renderQuoted (value : String) : String :=
+  "\"" ++ escape value ++ "\""
+
+/-- Render in compact canonical form. Invalid bare hints are safely quoted. -/
+def render : SExpr → String
+  | .str .quoted value => renderQuoted value
+  | .str .bare value => if isValidBare value then value else renderQuoted value
+  | .num value => value.render
+  | .hex value => "0x" ++ renderHex value
+  | .list children => "(" ++ " ".intercalate (children.map render) ++ ")"
+
 /-- Construct a string atom, quoting only when required for unambiguous parsing. -/
 def string (value : String) : SExpr :=
-  .str (if canBeBare value then .bare else .quoted) value
+  .str (if isValidBare value then .bare else .quoted) value
 
 end SExpr
 end Sexp

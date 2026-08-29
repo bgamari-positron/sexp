@@ -1,6 +1,7 @@
 name = "sexp"
 version = "0.1.0"
 defaultTargets = ["sexp"]
+testDriver = "sexp"
 
 [[lean_lib]]
 name = "Sexp"
