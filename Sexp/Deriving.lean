@@ -6,15 +6,13 @@ namespace Sexp.Deriving
 
 open Lean Elab Command Term Meta
 open Lean.Parser.Term
+open Lean.Elab.Deriving
 
-private def mkInstance (declName : Name) : TermElabM Command := do
+private def mkCodecBody (indVal : InductiveVal) : TermElabM Term := do
   let env ← getEnv
-  unless isStructure env declName do
+  unless isStructure env indVal.name do
     throwError "SExprCodec deriving currently supports structures only"
-  let info ← getConstInfoInduct declName
-  unless info.numParams = 0 do
-    throwError "SExprCodec deriving currently supports non-parameterized structures only"
-  let fields := getStructureFieldsFlattened env declName (includeSubobjectFields := false)
+  let fields := getStructureFieldsFlattened env indVal.name (includeSubobjectFields := false)
   let locals := fields.map fun field => mkIdent ((`v).appendAfter field.getString!)
   let input := mkIdent `input
   let value := mkIdent `value
@@ -25,24 +23,41 @@ private def mkInstance (declName : Name) : TermElabM Command := do
     `((Sexp.codec (α := _)).encode $value:ident.$fieldId:ident)
   let assignments ← fields.zip locals |>.mapM fun (field, localId) =>
     `(structInstField| $(mkIdent field):ident := $localId:ident)
-  let tag := Syntax.mkStrLit declName.eraseMacroScopes.getString!
+  let tag := Syntax.mkStrLit indVal.name.eraseMacroScopes.getString!
   let encoded ← match encoders.toList with
     | [] => `([])
     | first :: rest => rest.foldlM (fun acc next => `($acc ++ $next)) first
-  let typeId := mkIdent declName
-  `(instance : Sexp.SExprCodec $typeId:ident where
-      codec := Sexp.Codec.tagged $tag {
-        decode := fun $input:ident => do
-          $[$decoders:doElem]*
-          return ({ $assignments:structInstField,* }, $input:ident)
-        encode := fun $value:ident => $encoded
-      })
+  `(Sexp.Codec.tagged $tag {
+      decode := fun $input:ident => do
+        $[$decoders:doElem]*
+        return ({ $assignments:structInstField,* }, $input:ident)
+      encode := fun $value:ident => $encoded
+    })
+
+private def mkAuxFunction (ctx : Lean.Elab.Deriving.Context) : TermElabM Command := do
+  let indVal := ctx.typeInfos[0]!
+  let auxName := ctx.auxFunNames[0]!
+  let header ← mkHeader ``Sexp.SExprCodec 0 indVal
+  let binders := header.binders
+  let body ← mkCodecBody indVal
+  `(def $(mkIdent auxName):ident $binders:bracketedBinder* : Sexp.Codec $(header.targetType) :=
+      $body:term)
+
+private def mkCommands (declName : Name) : TermElabM (Array Command) := do
+  let ctx ← mkContext ``Sexp.SExprCodec "codec" declName
+  if ctx.typeInfos.size != 1 then
+    throwError "SExprCodec deriving does not yet support mutually recursive structures"
+  if ctx.typeInfos[0]!.isRec then
+    throwError "SExprCodec deriving does not yet support recursive structures"
+  let aux ← mkAuxFunction ctx
+  let instances ← mkInstanceCmds ctx ``Sexp.SExprCodec #[declName]
+  pure (#[aux] ++ instances)
 
 private def deriveSExprCodec (declNames : Array Name) : CommandElabM Bool := do
   if declNames.isEmpty then return false
   for declName in declNames do
-    let command ← liftTermElabM <| mkInstance declName
-    elabCommand command
+    let commands ← liftTermElabM <| mkCommands declName
+    commands.forM elabCommand
   return true
 
 initialize

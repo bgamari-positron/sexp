@@ -36,7 +36,7 @@ Derived grammar is positional and canonical:
 - lists: `(list VALUE...)`
 - booleans: `yes` or `no`
 
-Current deriving support covers non-parameterized structures. Each field type needs an `SExprCodec` instance.
+Current deriving support covers non-recursive structures, including parameterized structures. It generates the necessary `SExprCodec` constraints for type parameters used by fields.
 
 ## Development
 
