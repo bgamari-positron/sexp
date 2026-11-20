@@ -76,6 +76,37 @@ inductive CheckedChoice (α : Type u) (p : α → Prop) [SExprCodec α] [Decidab
 inductive EmptyChoice where
   deriving SExprCodec
 
+inductive ExprTy where
+  | unsigned (bits : Nat)
+  | flag
+
+structure FamilyCommand (E : ExprTy → Type u) where
+  count : E (.unsigned 13)
+  enabled : E .flag
+  deriving SExprCodec
+
+inductive FamilyAction (E : ExprTy → Type u) : Type u where
+  | idle
+  | run (count : E (.unsigned 13))
+  deriving SExprCodec
+
+structure ExplicitFamily (E : ExprTy → Type u) [∀ t, SExprCodec (E t)] where
+  count : E (.unsigned 13)
+  deriving SExprCodec
+
+structure DependentFamily (E : (n : Nat) → Fin n → Type u) where
+  value : E 2 ⟨0, by decide⟩
+  deriving SExprCodec
+
+example (E : ExprTy → Type u) [∀ t, SExprCodec (E t)] :
+    SExprCodec (FamilyCommand E) := inferInstance
+example (E : ExprTy → Type u) [∀ t, SExprCodec (E t)] :
+    SExprCodec (FamilyAction E) := inferInstance
+example (E : ExprTy → Type u) [∀ t, SExprCodec (E t)] :
+    SExprCodec (ExplicitFamily E) := inferInstance
+example (E : (n : Nat) → Fin n → Type u) [∀ n i, SExprCodec (E n i)] :
+    SExprCodec (DependentFamily E) := inferInstance
+
 /-- error: SExprCodec deriving does not yet support indexed inductives -/
 #guard_msgs in
 inductive IndexedChoice : Nat → Type where
@@ -241,7 +272,21 @@ private def checkInductives : IO Unit := do
   assert! (SExprCodec.parse "(value 3)" : Except String (CheckedChoice Nat (fun n => n % 2 = 0))).toOption.isNone
   assert! (SExprCodec.parse "(anything)" : Except String EmptyChoice).toOption.isNone
 
+private def checkFamilies : IO Unit := do
+  let command : FamilyCommand (fun _ => Nat) := ⟨13, 1⟩
+  assert! SExprCodec.render command == "(FamilyCommand 13 1)"
+  let decoded : FamilyCommand (fun _ => Nat) ← IO.ofExcept (SExprCodec.parse (SExprCodec.render command))
+  assert! decoded.count == 13 && decoded.enabled == 1
+  let action : FamilyAction (fun _ => Nat) := .run 42
+  let decoded : FamilyAction (fun _ => Nat) ← IO.ofExcept (SExprCodec.parse (SExprCodec.render action))
+  assert! SExprCodec.render decoded == "(run 42)"
+  let explicit : ExplicitFamily (fun _ => Nat) := ⟨7⟩
+  assert! (← IO.ofExcept (SExprCodec.parse (SExprCodec.render explicit)) : ExplicitFamily (fun _ => Nat)).count == 7
+  let dependent : DependentFamily (fun _ _ => Nat) := ⟨9⟩
+  assert! (← IO.ofExcept (SExprCodec.parse (SExprCodec.render dependent)) : DependentFamily (fun _ _ => Nat)).value == 9
+
 def main : IO Unit := do
+  checkFamilies
   checkInductives
   checkEmap
   checkProofs

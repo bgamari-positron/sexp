@@ -118,21 +118,20 @@ private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name)
         | _ => throw { message := "expected constructor list for " ++ $typeName }
       encodeTerm := $encoder })
 
-private partial def paramTypeSyntax (xs : Array Expr) (argNames : Array Name)
+private def paramTypeSyntax (xs : Array Expr) (argNames : Array Name)
     (type : Expr) : TermElabM Term := do
-  match type with
-  | .fvar id =>
-      for h : i in *...xs.size do
-        if xs[i] == .fvar id then return mkIdent argNames[i]!
-      throwError "SExprCodec deriving encountered an unknown parameter in an instance type"
-  | .const name _ =>
-      `(@$(mkCIdent name))
-  | .app fn arg =>
-      `($(← paramTypeSyntax xs argNames fn) $(← paramTypeSyntax xs argNames arg))
-  | .mdata _ type =>
-      paramTypeSyntax xs argNames type
-  | type =>
-      throwError "SExprCodec deriving does not support structure instance parameter type {type}"
+  let mut lctx ← getLCtx
+  for param in xs, name in argNames do
+    lctx := lctx.setUserName param.fvarId! name
+  withLCtx lctx (← getLocalInstances) do
+    PrettyPrinter.delab type
+
+private def codecConstraint (param : Expr) : TermElabM Expr := do
+  forallTelescope (← inferType param) fun args _ => do
+    let type ← mkAppM ``Sexp.SExprCodec #[mkAppN param args]
+    unless ← isTypeCorrect type do
+      throwError "parameter does not produce a type"
+    mkForallFVars args type
 
 private def fieldsHaveCodecs (indVal : InductiveVal) (params : Array Expr) : TermElabM Bool := do
   try
@@ -148,7 +147,7 @@ private def fieldsHaveCodecs (indVal : InductiveVal) (params : Array Expr) : Ter
   catch _ =>
     pure false
 
-/-- Preserve instance parameters from the structure and add only non-duplicate
+/-- Preserve instance parameters from the type and add only non-duplicate
 codec parameters accepted by `SExprCodec`. -/
 private def mkCodecHeader (indVal : InductiveVal) : TermElabM Header := do
   let argNames ← mkInductArgNames indVal
@@ -168,9 +167,10 @@ private def mkCodecHeader (indVal : InductiveVal) : TermElabM Header := do
     unless ← fieldsHaveCodecs indVal xs do
       for h : i in *...xs.size do
         try
-          let type ← mkAppM ``Sexp.SExprCodec #[xs[i]]
-          if (← isTypeCorrect type) && !(← instanceTypes.anyM fun instanceType => liftMetaM <| isDefEqGuarded type instanceType) then
-            binders := binders.push (← `(instBinderF| [Sexp.SExprCodec $(mkIdent argNames[i]!) ])).raw
+          let type ← codecConstraint xs[i]
+          if !(← instanceTypes.anyM fun instanceType => liftMetaM <| isDefEqGuarded type instanceType) then
+            let typeSyntax ← paramTypeSyntax xs argNames type
+            binders := binders.push (← `(instBinderF| [$typeSyntax])).raw
         catch _ => pure ()
     pure (binders.map fun binder => ⟨binder⟩)
   pure { binders, argNames, targetNames := #[], targetType }

@@ -43,6 +43,30 @@ fractional zeroes while retaining read-only `mantissa` and `scale` accessors; fo
 
 Current deriving support covers non-recursive structures and non-recursive, non-indexed inductives, including parameterized types. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
 
+## Codec families
+
+Deriving can infer codec constraints for type families without adding instance
+parameters to the original type:
+
+```lean
+structure Command (E : Nat → Type) where
+  count : E 13
+  address : E 32
+  deriving SExprCodec
+
+example (E : Nat → Type) [∀ bits, SExprCodec (E bits)] :
+    SExprCodec (Command E) := inferInstance
+```
+
+The generated instance requires `[∀ bits, SExprCodec (E bits)]`. Families with
+multiple dependent arguments also work. Existing quantified instance parameters
+are preserved. If existing instances already provide all field codecs, deriving
+adds no further constraints. Otherwise, inferred family constraints cover every
+index, not just the indices used by the fields.
+
+This supports fields of indexed types; it does not add deriving for indexed
+inductives themselves or construct codecs for the expression family.
+
 ## Proof-bearing values
 
 Subtype codecs reuse the representation of the underlying value. Decoding checks
