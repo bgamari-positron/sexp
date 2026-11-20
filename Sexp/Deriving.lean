@@ -73,6 +73,31 @@ private def mkCodecBody (indVal : InductiveVal) (argNames : Array Name) : TermEl
       encode := fun $value:ident => $encoded
     })
 
+private partial def mkIndexPattern (index : Expr) (fields : Array Expr)
+    (locals : Array Ident) (seen : Array FVarId := #[]) : TermElabM (Term × Array FVarId × Bool) := do
+  match (← whnf index).consumeMData with
+  | .fvar id =>
+    unless fields.contains (.fvar id) && !seen.contains id do
+      throwError "SExprCodec deriving requires distinct constructor fields in index patterns"
+    let some i := fields.idxOf? (.fvar id) | unreachable!
+    return (⟨locals[i]!.raw⟩, seen.push id, false)
+  | .lit (.natVal n) => return (Syntax.mkNumLit (toString n), seen, true)
+  | index =>
+    let .const name _ := index.getAppFn
+      | throwError "SExprCodec deriving requires constructor-shaped indices"
+    let .ctorInfo ctor ← getConstInfo name
+      | throwError "SExprCodec deriving requires constructor-shaped indices"
+    let args := index.getAppArgs
+    let mut patterns ← (List.range ctor.numParams).toArray.mapM fun _ => `(_)
+    let mut seen := seen
+    let mut mayFail : Bool := (← getConstInfoInduct ctor.induct).ctors.length > 1
+    for arg in args.extract ctor.numParams args.size do
+      let (pattern, nextSeen, argMayFail) ← mkIndexPattern arg fields locals seen
+      patterns := patterns.push pattern
+      seen := nextSeen
+      mayFail := mayFail || argMayFail
+    return (← `(@$(mkCIdent name) $patterns*), seen, mayFail)
+
 private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name) :
     TermElabM Term := do
   let input := mkIdent `input
@@ -82,8 +107,8 @@ private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name)
   let mut alternatives := #[]
   for ctorName in indVal.ctors.reverse do
     let ctor ← getConstInfoCtor ctorName
-    let (fields, locals, proofTypes) ← forallBoundedTelescope ctor.type indVal.numParams fun params type => do
-      forallBoundedTelescope type ctor.numFields fun fields _ => do
+    let (fields, locals, proofTypes, indexPattern, stored) ← forallBoundedTelescope ctor.type indVal.numParams fun params type => do
+      forallBoundedTelescope type ctor.numFields fun fields result => do
         let names ← fields.mapM fun field => return (← field.fvarId!.getDecl).userName
         let locals := fields.mapIdx fun i _ => mkIdent (Name.mkSimple s!"v{i}")
         let mut lctx ← getLCtx
@@ -96,18 +121,30 @@ private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name)
             let type ← inferType field
             if ← isProp type then return some (← PrettyPrinter.delab type)
             else return none
-        return (names, locals, proofTypes)
-    let params ← argNames.mapM fun _ => `(_)
+        let (indexPattern, recovered) ← if indVal.numIndices == 0 then pure (none, #[]) else do
+          let (pattern, recovered, mayFail) ← mkIndexPattern result.getAppArgs[indVal.numParams]! fields locals
+          pure (some (pattern, mayFail), recovered)
+        let stored := (List.range fields.size).toArray.filter fun i => !recovered.contains fields[i]!.fvarId!
+        return (names, locals, proofTypes, indexPattern, stored)
+    let params ← (argNames.extract 0 indVal.numParams).mapM fun _ => `(_)
     let args : Array Term := locals.map fun localId => ⟨localId.raw⟩
     let constructor ← `(@$(mkCIdent ctorName) $params* $args*)
-    let decoder ← mkFieldDecoder fields locals proofTypes constructor
-    let encoded ← mkFieldEncoder args proofTypes
+    let decoder ← mkFieldDecoder (stored.map (fields[·]!)) (stored.map (locals[·]!))
+      (stored.map (proofTypes[·]!)) constructor
+    let encoded ← mkFieldEncoder (stored.map (args[·]!)) (stored.map (proofTypes[·]!))
     let ctorTag := Syntax.mkStrLit ctorName.eraseMacroScopes.getString!
-    decode ← `(if $tag:ident == $ctorTag then
-      (Sexp.Codec.tagged $ctorTag {
-        decode := fun $input:ident => $decoder
-        encode := fun _ => [] }).decodeTerm $input:ident
-      else $decode)
+    let mut branch ← `((Sexp.Codec.tagged $ctorTag {
+      decode := fun $input:ident => $decoder
+      encode := fun _ => [] }).decodeTerm $input:ident)
+    if let some (pattern, mayFail) := indexPattern then
+      let index := mkIdent argNames[indVal.numParams]!
+      if !mayFail then
+        branch ← `(match $index:ident with | $pattern => $branch)
+      else
+        branch ← `(match $index:ident with
+          | $pattern => $branch
+          | _ => throw { context := [$ctorTag], message := "constructor incompatible with expected index" })
+    decode ← `(if $tag:ident == $ctorTag then $branch else $decode)
     alternatives := alternatives.push (← `(matchAltExpr|
       | $constructor => Sexp.SExpr.list (Sexp.SExpr.string $ctorTag :: $encoded)))
   let encoder ← if alternatives.isEmpty then `(fun value => nomatch value)
@@ -152,7 +189,7 @@ codec parameters accepted by `SExprCodec`. -/
 private def mkCodecHeader (indVal : InductiveVal) : TermElabM Header := do
   let argNames ← mkInductArgNames indVal
   let targetType ← mkInductiveApp indVal argNames
-  let binders ← forallBoundedTelescope indVal.type indVal.numParams fun xs _ => do
+  let binders ← forallTelescope indVal.type fun xs _ => do
     let mut binders : Array Syntax := #[]
     let mut instanceTypes : Array Expr := #[]
     for h : i in *...xs.size do
@@ -164,10 +201,10 @@ private def mkCodecHeader (indVal : InductiveVal) : TermElabM Header := do
         instanceTypes := instanceTypes.push localDecl.type
       else
         binders := binders.push (← `(implicitBinderF| {$(mkIdent argName)})).raw
-    unless ← fieldsHaveCodecs indVal xs do
-      for h : i in *...xs.size do
+    unless ← fieldsHaveCodecs indVal (xs.extract 0 indVal.numParams) do
+      for h : i in *...indVal.numParams do
         try
-          let type ← codecConstraint xs[i]
+          let type ← codecConstraint xs[i]!
           if !(← instanceTypes.anyM fun instanceType => liftMetaM <| isDefEqGuarded type instanceType) then
             let typeSyntax ← paramTypeSyntax xs argNames type
             binders := binders.push (← `(instBinderF| [$typeSyntax])).raw
@@ -196,8 +233,8 @@ private def mkCommands (declName : Name) : TermElabM (Array Command) := do
     throwError "SExprCodec deriving does not yet support mutually recursive types"
   if ctx.typeInfos[0]!.isRec then
     throwError "SExprCodec deriving does not yet support recursive types"
-  if ctx.typeInfos[0]!.numIndices != 0 then
-    throwError "SExprCodec deriving does not yet support indexed inductives"
+  if ctx.typeInfos[0]!.numIndices > 1 then
+    throwError "SExprCodec deriving does not yet support multiple indices"
   pure #[← mkAuxFunction ctx, ← mkInstance ctx]
 
 private def deriveSExprCodec (declNames : Array Name) : CommandElabM Bool := do

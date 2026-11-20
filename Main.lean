@@ -139,10 +139,45 @@ private structure CheckedTransfer (E : ExprTy → Type) where
   trigger : E (.unsigned 13)
   deriving SExprCodec
 
-/-- error: SExprCodec deriving does not yet support indexed inductives -/
-#guard_msgs in
 inductive IndexedChoice : Nat → Type where
   | zero : IndexedChoice 0
+  deriving SExprCodec
+
+inductive IndexedValue (ν : ExprTy → Type) : ExprTy → Type where
+  | unsigned {width : Nat} (value : Nat) (fits : value < width) : IndexedValue ν (.unsigned width)
+  | flag (value : Bool) : IndexedValue ν .flag
+  | var {t : ExprTy} (name : ν t) : IndexedValue ν t
+  deriving SExprCodec
+
+private def IndexedNames : ExprTy → Type
+  | .unsigned _ => String
+  | .flag => Bool
+
+private instance (t : ExprTy) : SExprCodec (IndexedNames t) :=
+  match t with
+  | .unsigned _ => inferInstanceAs (SExprCodec String)
+  | .flag => inferInstanceAs (SExprCodec Bool)
+
+inductive IndexedPair : Nat × Nat → Type where
+  | value (a b : Nat) (payload : String) : IndexedPair (a, b)
+  deriving SExprCodec
+
+/-- error: SExprCodec deriving requires distinct constructor fields in index patterns -/
+#guard_msgs in
+inductive RepeatedIndex : Nat × Nat → Type where
+  | value (n : Nat) : RepeatedIndex (n, n)
+  deriving SExprCodec
+
+/-- error: SExprCodec deriving does not yet support multiple indices -/
+#guard_msgs in
+inductive MultiIndexed : Nat → Nat → Type where
+  | zero : MultiIndexed 0 0
+  deriving SExprCodec
+
+/-- error: SExprCodec deriving requires constructor-shaped indices -/
+#guard_msgs in
+inductive ComputedIndex : Nat → Type where
+  | value (a b : Nat) : ComputedIndex (a + b)
   deriving SExprCodec
 
 /-- error: SExprCodec deriving does not yet support recursive types -/
@@ -340,7 +375,32 @@ private def checkQuantifiedProofs : IO Unit := do
       | .error error => error.context == ["CheckedTransfer"] && error.message == s!"proof field {field} failed"
       | .ok _ => false : Bool)
 
+private def checkIndexed : IO Unit := do
+  let value : IndexedValue (fun _ => String) (.unsigned 8) := .unsigned 7 (by decide)
+  assert! SExprCodec.render value == "(unsigned 7)"
+  let decoded : IndexedValue (fun _ => String) (.unsigned 8) ← IO.ofExcept (SExprCodec.parse "(unsigned 7)")
+  assert! SExprCodec.render decoded == "(unsigned 7)"
+  assert! (SExprCodec.parse "(unsigned 7)" : Except String (IndexedValue (fun _ => String) (.unsigned 4))).toOption.isNone
+  assert! (SExprCodec.parse "(unsigned 7)" : Except String (IndexedValue (fun _ => String) .flag)).toOption.isNone
+  assert! (SExprCodec.parse "(flag yes)" : Except String (IndexedValue (fun _ => String) (.unsigned 8))).toOption.isNone
+  assert! (SExprCodec.parse "(unsigned 8 7)" : Except String (IndexedValue (fun _ => String) (.unsigned 8))).toOption.isNone
+  let flag : IndexedValue (fun _ => String) .flag ← IO.ofExcept (SExprCodec.parse "(flag yes)")
+  assert! SExprCodec.render flag == "(flag yes)"
+  let name : IndexedValue (fun _ => String) (.unsigned 8) ← IO.ofExcept (SExprCodec.parse "(var counter)")
+  assert! SExprCodec.render name == "(var counter)"
+  let typedName : IndexedValue IndexedNames .flag ← IO.ofExcept (SExprCodec.parse "(var yes)")
+  assert! SExprCodec.render typedName == "(var yes)"
+  assert! (SExprCodec.parse "(var counter)" : Except String (IndexedValue IndexedNames .flag)).toOption.isNone
+  let typedName : IndexedValue IndexedNames (.unsigned 8) ← IO.ofExcept (SExprCodec.parse "(var counter)")
+  assert! SExprCodec.render typedName == "(var counter)"
+  let pair : IndexedPair (2, 3) ← IO.ofExcept (SExprCodec.parse "(value payload)")
+  assert! SExprCodec.render pair == "(value payload)"
+  let decodedZero : IndexedChoice 0 ← IO.ofExcept (SExprCodec.parse "(zero)")
+  assert! SExprCodec.render decodedZero == "(zero)"
+  assert! (SExprCodec.parse "(zero)" : Except String (IndexedChoice 1)).toOption.isNone
+
 def main : IO Unit := do
+  checkIndexed
   checkQuantifiedProofs
   checkFamilies
   checkInductives

@@ -41,7 +41,7 @@ Construct decimals with `Decimal.ofScientific mantissa scale`. It canonicalizes 
 fractional zeroes while retaining read-only `mantissa` and `scale` accessors; for example,
 `Decimal.ofScientific 10 1` has mantissa `1` and scale `0`.
 
-Current deriving support covers non-recursive structures and non-recursive, non-indexed inductives, including parameterized types. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
+Current deriving support covers non-recursive structures and non-recursive inductives (with the index restrictions below), including parameterized types. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
 
 ## Codec families
 
@@ -64,8 +64,31 @@ are preserved. If existing instances already provide all field codecs, deriving
 adds no further constraints. Otherwise, inferred family constraints cover every
 index, not just the indices used by the fields.
 
-This supports fields of indexed types; it does not add deriving for indexed
-inductives themselves or construct codecs for the expression family.
+Codec-family constraints do not construct codecs for the expression family.
+
+## Indexed values
+
+Deriving supports one index whose constructor result is a pattern of constructors,
+natural-number literals, and distinct constructor fields. It decodes at the
+expected index, not into an existential package:
+
+```lean
+inductive BoundedValue : Nat → Type where
+  | value {limit : Nat} (n : Nat) (fits : n < limit) : BoundedValue limit
+  deriving SExprCodec
+
+-- The limit and proof are omitted: (value 7).
+#eval SExprCodec.render (BoundedValue.value (limit := 8) 7 (by decide))
+```
+
+Decoding `(value 7)` at `BoundedValue 8` succeeds; at `BoundedValue 4` it fails.
+Arguments recovered from the expected index are not serialized. Constructors
+incompatible with that index are rejected. No codec or equality decision for the
+index itself is required.
+
+Recursive types, multiple indices, repeated fields in index patterns, and computed
+indices such as `a + b` remain unsupported. An index pattern must not refer to a
+uniform parameter. These cases require a custom codec.
 
 ## Proof-bearing values
 
