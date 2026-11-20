@@ -32,6 +32,7 @@ Codec.tagged  : String → Codec α → Codec α
 Derived grammar is positional and canonical:
 
 - structures: `(TypeName FIELD...)`
+- other inductives: `(constructorName FIELD...)`, including `(constructorName)` for nullary constructors
 - options: `(none)` or `(some VALUE...)`
 - lists: `(list VALUE...)`
 - booleans: `yes` or `no`
@@ -40,7 +41,7 @@ Construct decimals with `Decimal.ofScientific mantissa scale`. It canonicalizes 
 fractional zeroes while retaining read-only `mantissa` and `scale` accessors; for example,
 `Decimal.ofScientific 10 1` has mantissa `1` and scale `0`.
 
-Current deriving support covers non-recursive structures, including parameterized structures. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
+Current deriving support covers non-recursive structures and non-recursive, non-indexed inductives, including parameterized types. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
 
 ## Proof-bearing values
 
@@ -60,6 +61,21 @@ structure Even where
 -- Encodes as (Even 4); decoding (Even 3) fails.
 #eval SExprCodec.render (⟨4, by decide⟩ : Even)
 ```
+
+Constructor proof fields work the same way:
+
+```lean
+inductive Shape where
+  | plain
+  | mla (heads chunks : Nat) (fits : heads * chunks ≤ 4096)
+  deriving SExprCodec
+
+-- Encodes as (mla 4 8); decoding (mla 4096 2) fails.
+#eval SExprCodec.render (Shape.mla 4 8 (by decide))
+```
+
+Constructor tags use the final component of the constructor name. Decoding rejects
+unknown tags, missing fields, extra fields, and failed proof checks.
 
 Each proof field needs a computable `Decidable` instance. Predicate parameters can
 supply this through `[DecidablePred p]`. Arbitrary propositions need a custom

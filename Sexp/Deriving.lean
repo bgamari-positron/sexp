@@ -8,6 +8,30 @@ open Lean Elab Command Term Meta
 open Lean.Parser.Term
 open Lean.Elab.Deriving
 
+private def mkFieldDecoder (fields : Array Name) (locals : Array Ident)
+    (proofTypes : Array (Option Term)) (result : Term) : TermElabM Term := do
+  let input := mkIdent `input
+  let mut decoder ← `(pure ($result, $input:ident))
+  for i in (List.range fields.size).reverse do
+    let localId := locals[i]!
+    if let some proposition := proofTypes[i]! then
+      let message := Syntax.mkStrLit s!"proof field {fields[i]!} failed"
+      decoder ← `(if $localId:ident : $proposition then $decoder
+        else throw { message := $message })
+    else
+      decoder ← `(do
+        let ($localId:ident, $input:ident) ← (Sexp.codec (α := _)).decode $input:ident
+        return ← $decoder)
+  return decoder
+
+private def mkFieldEncoder (values : Array Term) (proofTypes : Array (Option Term)) :
+    TermElabM Term := do
+  let mut encoded ← `([])
+  for i in (List.range values.size).reverse do
+    if proofTypes[i]!.isNone then
+      encoded ← `((Sexp.codec (α := _)).encode $(values[i]!) ++ $encoded)
+  return encoded
+
 private def mkCodecBody (indVal : InductiveVal) (argNames : Array Name) : TermElabM Term := do
   let env ← getEnv
   unless isStructure env indVal.name do
@@ -40,29 +64,59 @@ private def mkCodecBody (indVal : InductiveVal) (argNames : Array Name) : TermEl
         collect 0 #[]
   let assignments ← fields.zip locals |>.mapM fun (field, localId) =>
     `(structInstField| $(mkIdent field):ident := $localId:ident)
-  let mut decoder ← `(pure ({ $assignments:structInstField,* }, $input:ident))
-  let mut encoders := #[]
-  for i in (List.range fields.size).reverse do
-    let field := fields[i]!
-    let localId := locals[i]!
-    if let some proposition := proofTypes[i]! then
-      let message := Syntax.mkStrLit s!"proof field {field} failed"
-      decoder ← `(if $localId:ident : $proposition then $decoder
-        else throw { message := $message })
-    else
-      decoder ← `(do
-        let ($localId:ident, $input:ident) ← (Sexp.codec (α := _)).decode $input:ident
-        return ← $decoder)
-      let fieldId := mkIdent field
-      encoders := #[← `((Sexp.codec (α := _)).encode $value:ident.$fieldId:ident)] ++ encoders
+  let decoder ← mkFieldDecoder fields locals proofTypes (← `({ $assignments:structInstField,* }))
+  let values ← fields.mapM fun field => `($value:ident.$(mkIdent field):ident)
+  let encoded ← mkFieldEncoder values proofTypes
   let tag := Syntax.mkStrLit indVal.name.eraseMacroScopes.getString!
-  let encoded ← match encoders.toList with
-    | [] => `([])
-    | first :: rest => rest.foldlM (fun acc next => `($acc ++ $next)) first
   `(Sexp.Codec.tagged $tag {
       decode := fun $input:ident => $decoder
       encode := fun $value:ident => $encoded
     })
+
+private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name) :
+    TermElabM Term := do
+  let input := mkIdent `input
+  let tag := mkIdent `tag
+  let typeName := Syntax.mkStrLit indVal.name.toString
+  let mut decode ← `(throw { message := "unknown constructor tag for " ++ $typeName ++ ": " ++ $tag:ident })
+  let mut alternatives := #[]
+  for ctorName in indVal.ctors.reverse do
+    let ctor ← getConstInfoCtor ctorName
+    let (fields, locals, proofTypes) ← forallBoundedTelescope ctor.type indVal.numParams fun params type => do
+      forallBoundedTelescope type ctor.numFields fun fields _ => do
+        let names ← fields.mapM fun field => return (← field.fvarId!.getDecl).userName
+        let locals := fields.mapIdx fun i _ => mkIdent (Name.mkSimple s!"v{i}")
+        let mut lctx ← getLCtx
+        for param in params, name in argNames do
+          lctx := lctx.setUserName param.fvarId! name
+        for field in fields, localId in locals do
+          lctx := lctx.setUserName field.fvarId! localId.getId
+        let proofTypes ← withLCtx lctx (← getLocalInstances) do
+          fields.mapM fun field => do
+            let type ← inferType field
+            if ← isProp type then return some (← PrettyPrinter.delab type)
+            else return none
+        return (names, locals, proofTypes)
+    let params ← argNames.mapM fun _ => `(_)
+    let args : Array Term := locals.map fun localId => ⟨localId.raw⟩
+    let constructor ← `(@$(mkCIdent ctorName) $params* $args*)
+    let decoder ← mkFieldDecoder fields locals proofTypes constructor
+    let encoded ← mkFieldEncoder args proofTypes
+    let ctorTag := Syntax.mkStrLit ctorName.eraseMacroScopes.getString!
+    decode ← `(if $tag:ident == $ctorTag then
+      (Sexp.Codec.tagged $ctorTag {
+        decode := fun $input:ident => $decoder
+        encode := fun _ => [] }).decodeTerm $input:ident
+      else $decode)
+    alternatives := alternatives.push (← `(matchAltExpr|
+      | $constructor => Sexp.SExpr.list (Sexp.SExpr.string $ctorTag :: $encoded)))
+  let encoder ← if alternatives.isEmpty then `(fun value => nomatch value)
+    else `(fun value => match value with $alternatives:matchAlt*)
+  `({ decodeTerm := fun $input:ident =>
+        match $input:ident with
+        | .list (.str _ $tag:ident :: _) => $decode
+        | _ => throw { message := "expected constructor list for " ++ $typeName }
+      encodeTerm := $encoder })
 
 private partial def paramTypeSyntax (xs : Array Expr) (argNames : Array Name)
     (type : Expr) : TermElabM Term := do
@@ -81,14 +135,15 @@ private partial def paramTypeSyntax (xs : Array Expr) (argNames : Array Name)
       throwError "SExprCodec deriving does not support structure instance parameter type {type}"
 
 private def fieldsHaveCodecs (indVal : InductiveVal) (params : Array Expr) : TermElabM Bool := do
-  let ctor ← getConstInfoCtor indVal.ctors[0]!
-  let type ← liftMetaM <| instantiateForall ctor.type params
   try
-    forallBoundedTelescope type ctor.numFields fun fields _ => do
-      for field in fields do
-        let fieldType ← inferType field
-        unless ← isProp fieldType do
-          let _ ← liftMetaM <| synthInstance (← mkAppM ``Sexp.SExprCodec #[fieldType])
+    for ctorName in indVal.ctors do
+      let ctor ← getConstInfoCtor ctorName
+      let type ← liftMetaM <| instantiateForall ctor.type params
+      forallBoundedTelescope type ctor.numFields fun fields _ => do
+        for field in fields do
+          let fieldType ← inferType field
+          unless ← isProp fieldType do
+            let _ ← liftMetaM <| synthInstance (← mkAppM ``Sexp.SExprCodec #[fieldType])
     pure true
   catch _ =>
     pure false
@@ -124,7 +179,8 @@ private def mkAuxFunction (ctx : Lean.Elab.Deriving.Context) : TermElabM Command
   let indVal := ctx.typeInfos[0]!
   let auxName := ctx.auxFunNames[0]!
   let header ← mkCodecHeader indVal
-  let body ← mkCodecBody indVal header.argNames
+  let body ← if isStructure (← getEnv) indVal.name then mkCodecBody indVal header.argNames
+    else mkInductiveCodecBody indVal header.argNames
   `(def $(mkIdent auxName):ident $[$(header.binders):bracketedBinder]* :
       Sexp.TermCodec $(header.targetType) := $body:term)
 
@@ -137,9 +193,11 @@ private def mkInstance (ctx : Lean.Elab.Deriving.Context) : TermElabM Command :=
 private def mkCommands (declName : Name) : TermElabM (Array Command) := do
   let ctx ← mkContext ``Sexp.SExprCodec "codec" declName
   if ctx.typeInfos.size != 1 then
-    throwError "SExprCodec deriving does not yet support mutually recursive structures"
+    throwError "SExprCodec deriving does not yet support mutually recursive types"
   if ctx.typeInfos[0]!.isRec then
-    throwError "SExprCodec deriving does not yet support recursive structures"
+    throwError "SExprCodec deriving does not yet support recursive types"
+  if ctx.typeInfos[0]!.numIndices != 0 then
+    throwError "SExprCodec deriving does not yet support indexed inductives"
   pure #[← mkAuxFunction ctx, ← mkInstance ctx]
 
 private def deriveSExprCodec (declNames : Array Name) : CommandElabM Bool := do

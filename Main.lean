@@ -56,6 +56,38 @@ structure Checked (α : Type u) (p : α → Prop) [SExprCodec α] [DecidablePred
   value : α
   valid : p value
   deriving SExprCodec
+
+inductive Shape where
+  | plain
+  | mla (heads chunks : Nat) (fits : heads * chunks ≤ 4096) (label : String)
+  | bounded {n : Nat} (fits : n < 10)
+  | certified (valid : True)
+  deriving SExprCodec
+
+inductive Choice (α : Type u) : Type u where
+  | empty
+  | value (value : α)
+  deriving SExprCodec
+
+inductive CheckedChoice (α : Type u) (p : α → Prop) [SExprCodec α] [DecidablePred p] : Type u where
+  | value (value : α) (valid : p value)
+  deriving SExprCodec
+
+inductive EmptyChoice where
+  deriving SExprCodec
+
+/-- error: SExprCodec deriving does not yet support indexed inductives -/
+#guard_msgs in
+inductive IndexedChoice : Nat → Type where
+  | zero : IndexedChoice 0
+  deriving SExprCodec
+
+/-- error: SExprCodec deriving does not yet support recursive types -/
+#guard_msgs in
+inductive RecursiveChoice where
+  | next (value : RecursiveChoice)
+  deriving SExprCodec
+
 /--
 error: Application type mismatch: The argument
   Codec.constant ()
@@ -179,7 +211,38 @@ private def checkProofs : IO Unit := do
   assert! (SExprCodec.parse "3" : Except String {n : Nat // n % 2 = 0}).toOption.isNone
   assert! (SExprCodec.parse "nope" : Except String {n : Nat // n % 2 = 0}).toOption.isNone
 
+private def checkInductives : IO Unit := do
+  let shape := Shape.mla 4 8 (by decide) "ok"
+  assert! SExprCodec.render shape == "(mla 4 8 ok)"
+  let decoded : Shape ← IO.ofExcept (SExprCodec.parse (SExprCodec.render shape))
+  assert! SExprCodec.render decoded == SExprCodec.render shape
+  assert! SExprCodec.render Shape.plain == "(plain)"
+  assert! SExprCodec.render (← IO.ofExcept (SExprCodec.parse "(plain)") : Shape) == "(plain)"
+  assert! SExprCodec.render (Shape.bounded (n := 4) (by decide)) == "(bounded 4)"
+  assert! SExprCodec.render (← IO.ofExcept (SExprCodec.parse "(bounded 4)") : Shape) == "(bounded 4)"
+  assert! SExprCodec.render (← IO.ofExcept (SExprCodec.parse "(certified)") : Shape) == "(certified)"
+  assert! (SExprCodec.parse "(bounded 10)" : Except String Shape).toOption.isNone
+  for invalid in ["(unknown)", "plain", "()", "(plain extra)", "(mla 4 8)",
+      "(mla nope 8 ok)", "(mla 4 8 ok extra)", "(mla 4096 2 ok)"] do
+    assert! (SExprCodec.parse invalid : Except String Shape).toOption.isNone
+  assert! (match SExprCodec.decode (.list [.string "mla", Codec.natural.encodeTerm 4096,
+      Codec.natural.encodeTerm 2, .string "ok"]) with
+    | .error error => error.context == ["mla"] && error.message == "proof field fits failed"
+    | .ok (_ : Shape) => false : Bool)
+  let chosen := Choice.value ([Higher.value] : List Higher)
+  assert! (match (SExprCodec.parse (SExprCodec.render chosen) : Except String (Choice (List Higher))) with
+    | .ok (.value values) => values == [.value]
+    | _ => false : Bool)
+  assert! SExprCodec.render (Choice.empty : Choice Nat) == "(empty)"
+  let checked : CheckedChoice Nat (fun n => n % 2 = 0) := .value 4 (by decide)
+  let decoded : CheckedChoice Nat (fun n => n % 2 = 0) ←
+    IO.ofExcept (SExprCodec.parse (SExprCodec.render checked))
+  assert! SExprCodec.render decoded == "(value 4)"
+  assert! (SExprCodec.parse "(value 3)" : Except String (CheckedChoice Nat (fun n => n % 2 = 0))).toOption.isNone
+  assert! (SExprCodec.parse "(anything)" : Except String EmptyChoice).toOption.isNone
+
 def main : IO Unit := do
+  checkInductives
   checkEmap
   checkProofs
   checkDecimal
