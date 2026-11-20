@@ -53,6 +53,15 @@ def imap {α : Type u} {β : Type v} (to : α → β) (back : β → α)
   decodeTerm := fun value => codec.decodeTerm value |>.map to
   encodeTerm := codec.encodeTerm ∘ back
 
+/-- Validate decoded values and use the reverse projection for encoding. -/
+def emap {α : Type u} {β : Type v} (to : α → DecodeM β) (back : β → α)
+    (codec : TermCodec α) : TermCodec β where
+  decodeTerm := fun value =>
+    match codec.decodeTerm value with
+    | .ok decoded => to decoded
+    | .error error => .error error
+  encodeTerm := codec.encodeTerm ∘ back
+
 /-- Encode only the value; check the predicate when decoding. -/
 def subtype {α : Type u} (p : α → Prop) [DecidablePred p]
     (codec : TermCodec α) : TermCodec {x : α // p x} where
@@ -225,6 +234,18 @@ def RoundTrips {α : Type u} (codec : Codec α) : Prop :=
 /-- One-term round-trip law. -/
 def TermRoundTrips {α : Type u} (codec : TermCodec α) : Prop :=
   ∀ value, codec.decodeTerm (codec.encodeTerm value) = .ok value
+
+/-- Fallible mapping preserves round trips if validation accepts every encoded value. -/
+theorem emap_termRoundTrips {α : Type u} {β : Type v} {codec : TermCodec α}
+    {to : α → DecodeM β} {back : β → α}
+    (h : TermRoundTrips codec) (hback : ∀ value, to (back value) = .ok value) :
+    TermRoundTrips (TermCodec.emap to back codec) := by
+  intro value
+  change (match codec.decodeTerm (codec.encodeTerm (back value)) with
+    | .ok decoded => to decoded
+    | .error error => .error error) = .ok value
+  rw [h (back value)]
+  exact hback value
 
 theorem termRoundTrips_iff {α : Type u} {codec : TermCodec α} :
     RoundTrips (codec : Codec α) ↔ TermRoundTrips codec := by

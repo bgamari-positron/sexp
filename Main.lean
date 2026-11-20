@@ -136,6 +136,30 @@ private def checkLargeList : IO Unit := do
   let decoded ← IO.ofExcept (Codec.many Codec.string |>.decodeTerm input)
   assert! decoded.length == count
 
+private def validateEven (n : Nat) : DecodeM Even :=
+  if h : n % 2 = 0 then .ok ⟨n, h⟩
+  else .error { context := ["Even", "n"], message := "expected an even natural number" }
+
+example : Codec.TermRoundTrips (TermCodec.emap validateEven Even.n Codec.natural) := by
+  apply Codec.emap_termRoundTrips (by intro value; rfl)
+  intro value
+  simp [validateEven, value.isEven]
+
+private def checkEmap : IO Unit := do
+  let codec := TermCodec.emap validateEven Even.n Codec.natural
+  let value : Even := ⟨4, by decide⟩
+  assert! codec.encodeTerm value == Codec.natural.encodeTerm 4
+  assert! (match codec.decodeTerm (codec.encodeTerm value) with
+    | .ok decoded => decoded.n == 4
+    | .error _ => false : Bool)
+  assert! (match codec.decodeTerm (Codec.natural.encodeTerm 3) with
+    | .error error => error == { context := ["Even", "n"], message := "expected an even natural number" }
+    | .ok _ => false : Bool)
+  let malformed := SExpr.string "not a number"
+  assert! (match codec.decodeTerm malformed, Codec.natural.decodeTerm malformed with
+    | .error actual, .error expected => actual == expected
+    | _, _ => false : Bool)
+
 private def checkProofs : IO Unit := do
   let even : Even := ⟨4, by decide⟩
   assert! SExprCodec.render even == "(Even 4)"
@@ -156,6 +180,7 @@ private def checkProofs : IO Unit := do
   assert! (SExprCodec.parse "nope" : Except String {n : Nat // n % 2 = 0}).toOption.isNone
 
 def main : IO Unit := do
+  checkEmap
   checkProofs
   checkDecimal
   checkDeriving
