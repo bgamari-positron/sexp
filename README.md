@@ -105,6 +105,14 @@ Each proof field needs a computable `Decidable` instance. Predicate parameters c
 supply this through `[DecidablePred p]`. Arbitrary propositions need a custom
 codec with a proof-producing validator; proofs are not serialized.
 
+For quantified invariants, define a named predicate and a computable `Decidable`
+instance. For example, a writeback-bounds check can inspect an `Option` destination,
+run a bounds checker, and construct an existential witness from its successful
+result. A universal constraint over three optional inputs can instead decide
+three bounded checks. `Main.lean` tests both patterns together with a codec family.
+Default proof-field values are not validators; deriving checks the proposition
+against the decoded data.
+
 ## Development
 
 With direnv:

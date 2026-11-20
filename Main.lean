@@ -107,6 +107,38 @@ example (E : ExprTy → Type u) [∀ t, SExprCodec (E t)] :
 example (E : (n : Nat) → Fin n → Type u) [∀ n i, SExprCodec (E n i)] :
     SExprCodec (DependentFamily E) := inferInstance
 
+private def checkedEnd (base count : Nat) : Except String Nat :=
+  if base + count ≤ 256 then .ok (base + count) else .error "out of bounds"
+
+private def WritebackFits (destination : Option Nat) (count : Nat) : Prop :=
+  ∀ base ∈ destination, ∃ endOffset, checkedEnd base count = .ok endOffset
+
+private instance (destination : Option Nat) (count : Nat) : Decidable (WritebackFits destination count) := by
+  letI (base : Nat) : Decidable (∃ endOffset, checkedEnd base count = .ok endOffset) :=
+    match checkedEnd base count with
+    | .ok endOffset => isTrue ⟨endOffset, rfl⟩
+    | .error error => isFalse (by simp)
+  unfold WritebackFits
+  infer_instance
+
+private def SingleReads (a b c : Option Nat) : Prop :=
+  ∀ step, step ∈ a ∨ step ∈ b ∨ step ∈ c → step = 1
+
+private instance (a b c : Option Nat) : Decidable (SingleReads a b c) :=
+  decidable_of_iff ((∀ step ∈ a, step = 1) ∧ (∀ step ∈ b, step = 1) ∧ (∀ step ∈ c, step = 1)) (by
+    simp only [SingleReads, or_imp, forall_and])
+
+private structure CheckedTransfer (E : ExprTy → Type) where
+  destination : Option Nat
+  count : Nat
+  inBounds : WritebackFits destination count
+  a : Option Nat
+  b : Option Nat
+  c : Option Nat
+  singleReads : SingleReads a b c
+  trigger : E (.unsigned 13)
+  deriving SExprCodec
+
 /-- error: SExprCodec deriving does not yet support indexed inductives -/
 #guard_msgs in
 inductive IndexedChoice : Nat → Type where
@@ -285,7 +317,31 @@ private def checkFamilies : IO Unit := do
   let dependent : DependentFamily (fun _ _ => Nat) := ⟨9⟩
   assert! (← IO.ofExcept (SExprCodec.parse (SExprCodec.render dependent)) : DependentFamily (fun _ _ => Nat)).value == 9
 
+private def checkQuantifiedProofs : IO Unit := do
+  let transfer : CheckedTransfer (fun _ => Nat) := {
+    destination := some 250, count := 6, inBounds := by decide
+    a := some 1, b := none, c := some 1, singleReads := by decide
+    trigger := 7
+  }
+  let rendered := SExprCodec.render transfer
+  assert! rendered == "(CheckedTransfer (some 250) 6 (some 1) (none) (some 1) 7)"
+  let decoded : CheckedTransfer (fun _ => Nat) ← IO.ofExcept (SExprCodec.parse rendered)
+  assert! SExprCodec.render decoded == rendered
+  let absent := "(CheckedTransfer (none) 1000 (none) (none) (none) 9)"
+  let decoded : CheckedTransfer (fun _ => Nat) ← IO.ofExcept (SExprCodec.parse absent)
+  assert! decoded.destination.isNone && decoded.trigger == 9
+  for (input, field) in [
+      ("(CheckedTransfer (some 250) 7 (none) (none) (none) 7)", "inBounds"),
+      ("(CheckedTransfer (none) 0 (some 2) (none) (none) 7)", "singleReads"),
+      ("(CheckedTransfer (none) 0 (none) (some 2) (none) 7)", "singleReads"),
+      ("(CheckedTransfer (none) 0 (none) (none) (some 2) 7)", "singleReads")] do
+    let term ← IO.ofExcept (SExpr.parse input)
+    assert! (match (SExprCodec.decode term : DecodeM (CheckedTransfer (fun _ => Nat))) with
+      | .error error => error.context == ["CheckedTransfer"] && error.message == s!"proof field {field} failed"
+      | .ok _ => false : Bool)
+
 def main : IO Unit := do
+  checkQuantifiedProofs
   checkFamilies
   checkInductives
   checkEmap
