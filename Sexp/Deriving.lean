@@ -1,6 +1,10 @@
-import Lean.Elab.Deriving.Basic
-import Lean.Elab.Deriving.Util
-import Sexp.Codec
+module
+
+public meta import Lean.Elab.Deriving.Basic
+public meta import Lean.Elab.Deriving.Util
+public import Sexp.Codec
+
+public meta section
 
 namespace Sexp.Deriving
 
@@ -21,7 +25,7 @@ private def mkFieldDecoder (fields : Array Name) (locals : Array Ident)
     else
       decoder ← `(do
         let ($localId:ident, $input:ident) ← (Sexp.codec (α := _)).decode $input:ident
-        return ← $decoder)
+        return ← ($decoder))
   return decoder
 
 private def mkFieldEncoder (values : Array Term) (proofTypes : Array (Option Term)) :
@@ -297,7 +301,7 @@ private def mkRecursiveFunctions (ctx : Lean.Elab.Deriving.Context) : TermElabM 
           else `((Sexp.codec (α := $fieldType)).decodeTerm $term:ident)
         decoded ← `(do
           let $localId:ident ← $read:term
-          return ← $decoded)
+          return ← ($decoded))
     if let some (pattern, mayFail) := indexPattern then
       let index := mkIdent header.argNames[indVal.numParams]!
       if mayFail then

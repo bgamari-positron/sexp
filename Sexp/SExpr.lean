@@ -1,3 +1,7 @@
+module
+
+public section
+
 namespace Sexp
 
 inductive Quoting where

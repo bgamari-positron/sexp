@@ -1,4 +1,8 @@
-import Sexp.SExpr
+module
+
+public import Sexp.SExpr
+
+public section
 
 namespace Sexp
 

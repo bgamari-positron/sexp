@@ -1,3 +1,5 @@
-import Sexp.SExpr
-import Sexp.Codec
-import Sexp.Deriving
+module
+
+public import Sexp.SExpr
+public import Sexp.Codec
+public import Sexp.Deriving
