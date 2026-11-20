@@ -42,6 +42,29 @@ fractional zeroes while retaining read-only `mantissa` and `scale` accessors; fo
 
 Current deriving support covers non-recursive structures, including parameterized structures. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
 
+## Proof-bearing values
+
+Subtype codecs reuse the representation of the underlying value. Decoding checks
+its predicate with `[DecidablePred p]` and rejects values that fail the check.
+Use `TermCodec.subtype p codec` directly, or the `SExprCodec {x : α // p x}` instance.
+
+Deriving omits proof fields from the representation and checks their propositions
+after decoding the preceding fields:
+
+```lean
+structure Even where
+  n : Nat
+  isEven : n % 2 = 0
+  deriving SExprCodec
+
+-- Encodes as (Even 4); decoding (Even 3) fails.
+#eval SExprCodec.render (⟨4, by decide⟩ : Even)
+```
+
+Each proof field needs a computable `Decidable` instance. Predicate parameters can
+supply this through `[DecidablePred p]`. Arbitrary propositions need a custom
+codec with a proof-producing validator; proofs are not serialized.
+
 ## Development
 
 With direnv:

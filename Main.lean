@@ -42,6 +42,20 @@ structure PairBox (α β : Type) where
   right : β
   deriving Repr, BEq, SExprCodec
 
+structure Even where
+  n : Nat
+  isEven : n % 2 = 0
+  deriving SExprCodec
+
+structure BoundedEven extends Even where
+  label : String
+  small : n < 10
+  deriving SExprCodec
+
+structure Checked (α : Type u) (p : α → Prop) [SExprCodec α] [DecidablePred p] where
+  value : α
+  valid : p value
+  deriving SExprCodec
 /--
 error: Application type mismatch: The argument
   Codec.constant ()
@@ -122,7 +136,27 @@ private def checkLargeList : IO Unit := do
   let decoded ← IO.ofExcept (Codec.many Codec.string |>.decodeTerm input)
   assert! decoded.length == count
 
+private def checkProofs : IO Unit := do
+  let even : Even := ⟨4, by decide⟩
+  assert! SExprCodec.render even == "(Even 4)"
+  assert! (← IO.ofExcept (SExprCodec.parse (SExprCodec.render even)) : Even).n == 4
+  assert! (SExprCodec.parse "(Even 3)" : Except String Even).toOption.isNone
+  assert! (SExprCodec.parse "(Even 4 proof)" : Except String Even).toOption.isNone
+  let bounded : BoundedEven := { n := 4, isEven := by decide, label := "ok", small := by decide }
+  assert! (← IO.ofExcept (SExprCodec.parse (SExprCodec.render bounded)) : BoundedEven).label == "ok"
+  assert! (SExprCodec.parse "(BoundedEven 12 ok)" : Except String BoundedEven).toOption.isNone
+  assert! (SExprCodec.parse "(BoundedEven 3 ok)" : Except String BoundedEven).toOption.isNone
+  let checked : Checked Nat (fun n => n % 2 = 0) := ⟨4, by decide⟩
+  assert! (← IO.ofExcept (SExprCodec.parse (SExprCodec.render checked)) : Checked Nat (fun n => n % 2 = 0)).value == 4
+  assert! (SExprCodec.parse "(Checked 3)" : Except String (Checked Nat (fun n => n % 2 = 0))).toOption.isNone
+  let refined : {n : Nat // n % 2 = 0} := ⟨4, by decide⟩
+  assert! SExprCodec.render refined == "4"
+  assert! (← IO.ofExcept (SExprCodec.parse "4") : {n : Nat // n % 2 = 0}).val == 4
+  assert! (SExprCodec.parse "3" : Except String {n : Nat // n % 2 = 0}).toOption.isNone
+  assert! (SExprCodec.parse "nope" : Except String {n : Nat // n % 2 = 0}).toOption.isNone
+
 def main : IO Unit := do
+  checkProofs
   checkDecimal
   checkDeriving
   checkStringSafety

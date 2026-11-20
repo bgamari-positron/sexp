@@ -53,6 +53,17 @@ def imap {α : Type u} {β : Type v} (to : α → β) (back : β → α)
   decodeTerm := fun value => codec.decodeTerm value |>.map to
   encodeTerm := codec.encodeTerm ∘ back
 
+/-- Encode only the value; check the predicate when decoding. -/
+def subtype {α : Type u} (p : α → Prop) [DecidablePred p]
+    (codec : TermCodec α) : TermCodec {x : α // p x} where
+  encodeTerm := fun value => codec.encodeTerm value.val
+  decodeTerm := fun input => do
+    let value ← codec.decodeTerm input
+    if h : p value then
+      return ⟨value, h⟩
+    else
+      throw { message := "subtype predicate failed" }
+
 end TermCodec
 
 namespace Codec
@@ -276,6 +287,8 @@ instance : SExprCodec Int := ⟨Codec.integer⟩
 instance : SExprCodec Decimal := ⟨Codec.decimal⟩
 instance {α : Type u} [SExprCodec α] : SExprCodec (Option α) := ⟨Codec.option (codec (α := α))⟩
 instance {α : Type u} [SExprCodec α] : SExprCodec (List α) := ⟨Codec.many (codec (α := α))⟩
+instance {α : Type u} {p : α → Prop} [SExprCodec α] [DecidablePred p] :
+    SExprCodec {x : α // p x} := ⟨TermCodec.subtype p (codec (α := α))⟩
 
 namespace SExprCodec
 
