@@ -41,7 +41,7 @@ Construct decimals with `Decimal.ofScientific mantissa scale`. It canonicalizes 
 fractional zeroes while retaining read-only `mantissa` and `scale` accessors; for example,
 `Decimal.ofScientific 10 1` has mantissa `1` and scale `0`.
 
-Current deriving support covers non-recursive structures and non-recursive inductives (with the index restrictions below), including parameterized types. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
+Current deriving support covers structures and inductives with direct self-recursion (subject to the restrictions below), including parameterized types. Existing `SExprCodec` instance parameters are reused (including codecs for higher-kinded fields); otherwise deriving adds type-correct codec constraints for type parameters when field codecs are not already available.
 
 ## Codec families
 
@@ -86,9 +86,36 @@ Arguments recovered from the expected index are not serialized. Constructors
 incompatible with that index are rejected. No codec or equality decision for the
 index itself is required.
 
-Recursive types, multiple indices, repeated fields in index patterns, and computed
+Multiple indices, repeated fields in index patterns, and computed
 indices such as `a + b` remain unsupported. An index pattern must not refer to a
 uniform parameter. These cases require a custom codec.
+
+## Recursive values
+
+Direct self-recursion works with the same constructor-tagged format:
+
+```lean
+inductive Tree where
+  | leaf (value : Nat)
+  | branch (left right : Tree)
+  deriving SExprCodec
+```
+
+Deriving generates separate total encoder and decoder functions. Lean checks
+structural recursion on the value for encoding and decreasing S-expression size
+for decoding. The codec record only wraps these functions; it is not a recursive
+value. There is no fuel parameter or fixed depth limit. Termination does not imply
+constant stack use or protection from resource exhaustion on very large inputs.
+
+Recursive children can have different indices. For example, decoding an array
+index expression at type `t` can decode its children at `.array t` and
+`.unsigned 32`. Proof fields are checked after decoding their dependencies.
+`Sexp/Tests/Recursive.lean` contains handwritten and derived examples, with
+round-trip theorems assuming round-tripping name codecs.
+
+Mutual recursion, recursion through containers such as `List Tree`, and
+function-valued recursive fields are not supported. Recursive parameters must
+remain uniform; the single-index restrictions above still apply.
 
 ## Proof-bearing values
 

@@ -227,14 +227,111 @@ private def mkInstance (ctx : Lean.Elab.Deriving.Context) : TermElabM Command :=
   `(instance $(mkIdent ctx.instName):ident $[$(header.binders):bracketedBinder]* :
       Sexp.SExprCodec $(header.targetType) := ⟨$(mkIdent ctx.auxFunNames[0]!):ident⟩)
 
+private def mkRecursiveFunctions (ctx : Lean.Elab.Deriving.Context) : TermElabM (Array Command) := do
+  let indVal := ctx.typeInfos[0]!
+  let header ← mkCodecHeader indVal
+  let encodeName := mkIdent (ctx.auxFunNames[0]! ++ `encode)
+  let decodeName := mkIdent (ctx.auxFunNames[0]! ++ `decode)
+  let input := mkIdent `input
+  let value := mkIdent `value
+  let mut encodeAlts := #[]
+  let mut decodeAlts := #[]
+  for ctorName in indVal.ctors do
+    let ctor ← getConstInfoCtor ctorName
+    let (fieldNames, locals, types, proofs, recursive, stored, indexPattern) ←
+        forallBoundedTelescope ctor.type indVal.numParams fun params type => do
+      forallBoundedTelescope type ctor.numFields fun fields result => do
+        let fieldNames ← fields.mapM fun field => return (← field.fvarId!.getDecl).userName
+        let locals := fields.mapIdx fun i _ => mkIdent (Name.mkSimple s!"v{i}")
+        let mut lctx ← getLCtx
+        for param in params, name in header.argNames do
+          lctx := lctx.setUserName param.fvarId! name
+        for field in fields, localId in locals do
+          lctx := lctx.setUserName field.fvarId! localId.getId
+        withLCtx lctx (← getLocalInstances) do
+          let mut types := #[]
+          let mut proofs := #[]
+          let mut recursive := #[]
+          for field in fields do
+            let type ← inferType field
+            let reducedType ← whnf type
+            let direct := reducedType.getAppFn.isConstOf indVal.name
+            let isProof ← isProp type
+            if !isProof && !direct && (type.find? (·.isConstOf indVal.name)).isSome then
+              throwError "SExprCodec deriving supports only direct recursive fields"
+            if direct then
+              unless reducedType.getAppArgs.extract 0 indVal.numParams == params do
+                throwError "SExprCodec deriving requires uniform recursive parameters"
+            types := types.push (← PrettyPrinter.delab type)
+            proofs := proofs.push isProof
+            recursive := recursive.push direct
+          let (indexPattern, recovered) ← if indVal.numIndices == 0 then pure (none, #[]) else do
+            let (pattern, recovered, mayFail) ← mkIndexPattern result.getAppArgs[indVal.numParams]! fields locals
+            pure (some (pattern, mayFail), recovered)
+          let stored := (List.range fields.size).toArray.filter fun i => !recovered.contains fields[i]!.fvarId!
+          return (fieldNames, locals, types, proofs, recursive, stored, indexPattern)
+    let params ← (List.range indVal.numParams).toArray.mapM fun _ => `(_)
+    let args : Array Term := locals.map fun localId => ⟨localId.raw⟩
+    let constructor ← `(@$(mkCIdent ctorName) $params* $args*)
+    let tag := Syntax.mkStrLit ctorName.eraseMacroScopes.getString!
+    let dataFields := stored.filter fun i => !proofs[i]!
+    let terms := dataFields.map fun i => mkIdent (Name.mkSimple s!"term{i}")
+    let mut encoded := #[]
+    for i in dataFields do
+      let localId := locals[i]!
+      encoded := encoded.push (← if recursive[i]! then `($encodeName $localId:ident)
+        else `((Sexp.codec (α := _)).encodeTerm $localId:ident))
+    encodeAlts := encodeAlts.push (← `(matchAltExpr|
+      | $constructor => Sexp.SExpr.list (Sexp.SExpr.string $tag :: [$encoded,*])))
+    let mut decoded ← `(pure $constructor)
+    for i in stored.toList.reverse do
+      let localId := locals[i]!
+      let fieldType := types[i]!
+      if proofs[i]! then
+        let message := Syntax.mkStrLit s!"proof field {fieldNames[i]!} failed"
+        decoded ← `(if $localId:ident : $fieldType then $decoded
+          else throw { message := $message })
+      else
+        let term := mkIdent (Name.mkSimple s!"term{i}")
+        let read ← if recursive[i]! then `(($decodeName $term:ident : Sexp.DecodeM $fieldType))
+          else `((Sexp.codec (α := $fieldType)).decodeTerm $term:ident)
+        decoded ← `(do
+          let $localId:ident ← $read:term
+          return ← $decoded)
+    if let some (pattern, mayFail) := indexPattern then
+      let index := mkIdent header.argNames[indVal.numParams]!
+      if mayFail then
+        decoded ← `(match $index:ident with
+          | $pattern => $decoded
+          | _ => throw { message := "constructor incompatible with expected index" })
+      else
+        decoded ← `(match $index:ident with | $pattern => $decoded)
+    decoded ← `(($decoded : Sexp.DecodeM $(header.targetType)).mapError
+      (fun error => { error with context := $tag :: error.context }))
+    decodeAlts := decodeAlts.push (← `(matchAltExpr|
+      | .list [.str _ $tag, $terms:ident,*] => $decoded))
+  decodeAlts := decodeAlts.push (← `(matchAltExpr|
+    | _ => throw { message := "invalid recursive constructor or arity" }))
+  let encode ← `(def $encodeName $[$(header.binders):bracketedBinder]* ($value : $(header.targetType)) : Sexp.SExpr :=
+    match $value:ident with $encodeAlts:matchAlt*
+    termination_by structural $value:ident)
+  let decode ← `(def $decodeName $[$(header.binders):bracketedBinder]* ($input : Sexp.SExpr) : Sexp.DecodeM $(header.targetType) :=
+    match $input:ident with $decodeAlts:matchAlt*
+    termination_by sizeOf $input:ident)
+  let codec ← `(def $(mkIdent ctx.auxFunNames[0]!) $[$(header.binders):bracketedBinder]* : Sexp.TermCodec $(header.targetType) :=
+    { encodeTerm := $encodeName, decodeTerm := $decodeName })
+  return #[encode, decode, codec]
+
 private def mkCommands (declName : Name) : TermElabM (Array Command) := do
   let ctx ← mkContext ``Sexp.SExprCodec "codec" declName
   if ctx.typeInfos.size != 1 then
     throwError "SExprCodec deriving does not yet support mutually recursive types"
-  if ctx.typeInfos[0]!.isRec then
-    throwError "SExprCodec deriving does not yet support recursive types"
+  if ctx.typeInfos[0]!.isNested then
+    throwError "SExprCodec deriving supports only direct recursive fields"
   if ctx.typeInfos[0]!.numIndices > 1 then
     throwError "SExprCodec deriving does not yet support multiple indices"
+  if ctx.typeInfos[0]!.isRec then
+    return (← mkRecursiveFunctions ctx) ++ #[← mkInstance ctx]
   pure #[← mkAuxFunction ctx, ← mkInstance ctx]
 
 private def deriveSExprCodec (declNames : Array Name) : CommandElabM Bool := do

@@ -1,4 +1,5 @@
 import Sexp
+import Sexp.Tests.Recursive
 
 open Sexp
 
@@ -180,8 +181,6 @@ inductive ComputedIndex : Nat → Type where
   | value (a b : Nat) : ComputedIndex (a + b)
   deriving SExprCodec
 
-/-- error: SExprCodec deriving does not yet support recursive types -/
-#guard_msgs in
 inductive RecursiveChoice where
   | next (value : RecursiveChoice)
   deriving SExprCodec
@@ -400,6 +399,7 @@ private def checkIndexed : IO Unit := do
   assert! (SExprCodec.parse "(zero)" : Except String (IndexedChoice 1)).toOption.isNone
 
 def main : IO Unit := do
+  Sexp.Tests.Recursive.check
   checkIndexed
   checkQuantifiedProofs
   checkFamilies
