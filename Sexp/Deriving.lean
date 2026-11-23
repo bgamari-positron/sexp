@@ -13,7 +13,7 @@ open Lean.Parser.Term
 open Lean.Elab.Deriving
 
 private def mkFieldDecoder (fields : Array Name) (locals : Array Ident)
-    (proofTypes : Array (Option Term)) (result : Term) : TermElabM Term := do
+    (fieldTypes : Array Term) (proofTypes : Array (Option Term)) (result : Term) : TermElabM Term := do
   let input := mkIdent `input
   let mut decoder ← `(pure ($result, $input:ident))
   for i in (List.range fields.size).reverse do
@@ -24,7 +24,7 @@ private def mkFieldDecoder (fields : Array Name) (locals : Array Ident)
         else throw { message := $message })
     else
       decoder ← `(do
-        let ($localId:ident, $input:ident) ← (Sexp.codec (α := _)).decode $input:ident
+        let ($localId:ident, $input:ident) ← (Sexp.codec (α := $(fieldTypes[i]!))).decode $input:ident
         return ← ($decoder))
   return decoder
 
@@ -44,7 +44,7 @@ private def mkCodecBody (indVal : InductiveVal) (argNames : Array Name) : TermEl
   let locals := fields.map fun field => mkIdent ((`v).appendAfter field.getString!)
   let input := mkIdent `input
   let value := mkIdent `value
-  let proofTypes ← forallBoundedTelescope indVal.type indVal.numParams fun params _ => do
+  let fieldInfo ← forallBoundedTelescope indVal.type indVal.numParams fun params _ => do
     let mut lctx ← getLCtx
     for param in params, name in argNames do
       lctx := lctx.setUserName param.fvarId! name
@@ -52,7 +52,7 @@ private def mkCodecBody (indVal : InductiveVal) (argNames : Array Name) : TermEl
       let target := mkAppN (mkConst indVal.name (indVal.levelParams.map Level.param)) params
       withLocalDeclD `self target fun self => do
         let projections ← fields.mapM (fun field => liftMetaM <| mkProjection self field)
-        let rec collect (i : Nat) (values : Array Expr) : TermElabM (Array (Option Term)) := do
+        let rec collect (i : Nat) (values : Array Expr) : TermElabM (Array (Term × Option Term)) := do
           if i < fields.size then
             let type ← inferType projections[i]!
             let type := type.replace fun e =>
@@ -62,13 +62,15 @@ private def mkCodecBody (indVal : InductiveVal) (argNames : Array Name) : TermEl
                 pure (some (← PrettyPrinter.delab type))
               else pure none
             withLocalDeclD locals[i]!.getId type fun value => do
-              return #[proofType] ++ (← collect (i + 1) (values.push value))
+              return #[(← PrettyPrinter.delab type, proofType)] ++ (← collect (i + 1) (values.push value))
           else
             return #[]
         collect 0 #[]
+  let fieldTypes := fieldInfo.map Prod.fst
+  let proofTypes := fieldInfo.map Prod.snd
   let assignments ← fields.zip locals |>.mapM fun (field, localId) =>
     `(structInstField| $(mkIdent field):ident := $localId:ident)
-  let decoder ← mkFieldDecoder fields locals proofTypes (← `({ $assignments:structInstField,* }))
+  let decoder ← mkFieldDecoder fields locals fieldTypes proofTypes (← `({ $assignments:structInstField,* }))
   let values ← fields.mapM fun field => `($value:ident.$(mkIdent field):ident)
   let encoded ← mkFieldEncoder values proofTypes
   let tag := Syntax.mkStrLit indVal.name.eraseMacroScopes.getString!
@@ -111,7 +113,7 @@ private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name)
   let mut alternatives := #[]
   for ctorName in indVal.ctors.reverse do
     let ctor ← getConstInfoCtor ctorName
-    let (fields, locals, proofTypes, indexPattern, stored) ← forallBoundedTelescope ctor.type indVal.numParams fun params type => do
+    let (fields, locals, fieldTypes, proofTypes, indexPattern, stored) ← forallBoundedTelescope ctor.type indVal.numParams fun params type => do
       forallBoundedTelescope type ctor.numFields fun fields result => do
         let names ← fields.mapM fun field => return (← field.fvarId!.getDecl).userName
         let locals := fields.mapIdx fun i _ => mkIdent (Name.mkSimple s!"v{i}")
@@ -120,6 +122,9 @@ private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name)
           lctx := lctx.setUserName param.fvarId! name
         for field in fields, localId in locals do
           lctx := lctx.setUserName field.fvarId! localId.getId
+        let fieldTypes ← withLCtx lctx (← getLocalInstances) do
+          fields.mapM fun field => do
+            PrettyPrinter.delab (← inferType field)
         let proofTypes ← withLCtx lctx (← getLocalInstances) do
           fields.mapM fun field => do
             let type ← inferType field
@@ -129,12 +134,12 @@ private def mkInductiveCodecBody (indVal : InductiveVal) (argNames : Array Name)
           let (pattern, recovered, mayFail) ← mkIndexPattern result.getAppArgs[indVal.numParams]! fields locals
           pure (some (pattern, mayFail), recovered)
         let stored := (List.range fields.size).toArray.filter fun i => !recovered.contains fields[i]!.fvarId!
-        return (names, locals, proofTypes, indexPattern, stored)
+        return (names, locals, fieldTypes, proofTypes, indexPattern, stored)
     let params ← (argNames.extract 0 indVal.numParams).mapM fun _ => `(_)
     let args : Array Term := locals.map fun localId => ⟨localId.raw⟩
     let constructor ← `(@$(mkCIdent ctorName) $params* $args*)
     let decoder ← mkFieldDecoder (stored.map (fields[·]!)) (stored.map (locals[·]!))
-      (stored.map (proofTypes[·]!)) constructor
+      (stored.map (fieldTypes[·]!)) (stored.map (proofTypes[·]!)) constructor
     let encoded ← mkFieldEncoder (stored.map (args[·]!)) (stored.map (proofTypes[·]!))
     let ctorTag := Syntax.mkStrLit ctorName.eraseMacroScopes.getString!
     let mut branch ← `((Sexp.Codec.tagged $ctorTag {
@@ -168,7 +173,7 @@ private def paramTypeSyntax (xs : Array Expr) (argNames : Array Name)
     PrettyPrinter.delab type
 
 private def codecConstraint (param : Expr) : TermElabM Expr := do
-  forallTelescope (← inferType param) fun args _ => do
+  forallTelescopeReducing (← inferType param) fun args _ => do
     let type ← mkAppM ``Sexp.SExprCodec #[mkAppN param args]
     unless ← isTypeCorrect type do
       throwError "parameter does not produce a type"
@@ -204,7 +209,8 @@ private def mkCodecHeader (indVal : InductiveVal) : TermElabM Header := do
         binders := binders.push (← `(instBinderF| [$(mkIdent argName) : $type])).raw
         instanceTypes := instanceTypes.push localDecl.type
       else
-        binders := binders.push (← `(implicitBinderF| {$(mkIdent argName)})).raw
+        let type ← paramTypeSyntax xs argNames localDecl.type
+        binders := binders.push (← `(implicitBinderF| {$(mkIdent argName) : $type})).raw
     unless ← fieldsHaveCodecs indVal (xs.extract 0 indVal.numParams) do
       for h : i in *...indVal.numParams do
         try
